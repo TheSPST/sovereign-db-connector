@@ -1,0 +1,48 @@
+SOVEREIGN PROPRIETARY EVALUATION & TRADE SECRET LICENSE v2.0
+================================================================================
+Copyright (c) 2026 Sovereign Byte Technology. All Rights Reserved.
+Founder & Chief Scientist: Shubham Tomar
+Contact: legal@sovereignbyte.tech | connectwith@sovereignbyte.tech
+Website: https://sovereignbyte.tech
+================================================================================
+
+1. TRADE SECRET & CONFIDENTIAL INFORMATION STATUS
+-------------------------------------------------
+This Software, including but not limited to its architecture, container formats (.spst),
+bitstream patterns, compression dictionaries, in-memory query execution pipelines,
+and integration drivers, embodies valuable Trade Secrets, proprietary algorithms,
+and patent-pending intellectual property owned exclusively by Sovereign Byte Technology.
+This software is protected under the Defend Trade Secrets Act of 2016 (18 U.S.C. § 1836),
+the Uniform Trade Secrets Act (UTSA), the Copyright Act, and applicable international treaties.
+
+2. EVALUATION & LOCAL TESTING GRANT ONLY
+----------------------------------------
+Permission is hereby granted, free of charge, solely for non-commercial evaluation,
+local development testing, and air-gapped performance auditing. Any production usage,
+commercial cloud deployment, managed SaaS hosting, or commercial redistribution
+requires an executed Enterprise License Agreement with Sovereign Byte Technology.
+
+3. STRICT PROHIBITION AGAINST REVERSE ENGINEERING & DECOMPILATION
+-----------------------------------------------------------------
+You shall not, directly or indirectly:
+(a) Decompile, disassemble, reverse engineer, decrypt, or attempt to derive the source
+    code, underlying ideas, or proprietary compression algorithms of any binary or
+    compiled module (including 'sovereigndb' or SCTC binaries);
+(b) Scrape, ingest, or feed this source code, documentation, or architecture into any
+    generative artificial intelligence, large language model (LLM), or automated code
+    training pipeline without explicit prior written authorization;
+(c) Modify, obscure, or remove any copyright, trademark, patent-pending, or proprietary
+    notices placed upon or within the Software.
+
+4. TRADEMARK & BRAND PROTECTION
+-------------------------------
+Sovereign Byte Technology™, SovereignDB™, .spst™, TruthGuard™, SatyaKavach™,
+and all related emblems are common-law and registered trademarks. No rights to use
+these marks commercially are granted under this evaluation license.
+
+5. DISCLAIMER & REMEDIES
+------------------------
+Any breach of Section 1 or 3 causes irreparable injury to Sovereign Byte Technology
+for which monetary damages alone are inadequate. Sovereign Byte Technology shall be
+entitled to seek injunctive relief and statutory damages to the fullest extent permitted by law.
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT EXPRESS OR IMPLIED WARRANTY OF ANY KIND.
