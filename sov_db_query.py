@@ -161,12 +161,60 @@ def extract_sql_records(decompressed_text: str, table_terms: List[str], columns:
 
     return raw_rows, structured_records
 
-def load_in_memory_db(decompressed_text: str, wal_path: Optional[str] = None, engine_preference: str = "auto") -> Tuple[Any, Any, str, set]:
+def load_in_memory_db(
+    decompressed_text: str, 
+    wal_path: Optional[str] = None, 
+    engine_preference: str = "auto",
+    spst_path: Optional[str] = None
+) -> Tuple[Any, Any, str, set]:
     """
     Mounts an in-memory SQL database from the decompressed dump bitstream,
     then overlays and executes any pending Write-Ahead Log (WAL) statements.
     Supports SQLite (built-in standard library) and DuckDB (if installed).
+    Accelerated with zero-copy binary deserialization and persistent cache.
     """
+    # 0. Check for Instant Pre-compiled Binary Cache (.bin.cache)
+    if spst_path and os.path.exists(spst_path):
+        cache_bin_file = f"{spst_path}.bin.cache"
+        if os.path.exists(cache_bin_file):
+            spst_mtime = os.path.getmtime(spst_path)
+            cache_mtime = os.path.getmtime(cache_bin_file)
+            wal_mtime = os.path.getmtime(wal_path) if (wal_path and os.path.exists(wal_path)) else 0.0
+            if cache_mtime >= spst_mtime:
+                try:
+                    with open(cache_bin_file, "rb") as bf:
+                        bin_data = bf.read()
+                    conn = sqlite3.connect(":memory:")
+                    conn.deserialize(bin_data)
+                    cursor = conn.cursor()
+                    # Apply any WAL statements recorded after cache was created
+                    if wal_path and os.path.exists(wal_path) and wal_mtime > cache_mtime:
+                        with open(wal_path, "r", encoding="utf-8", errors="ignore") as wf:
+                            wal_text = wf.read()
+                        for stmt in wal_text.split(";"):
+                            stmt_clean = stmt.strip()
+                            if stmt_clean:
+                                try:
+                                    cursor.execute(stmt_clean)
+                                except Exception:
+                                    pass
+                        conn.commit()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+                    table_names = {r[0] for r in cursor.fetchall()}
+                    return conn, cursor, "SQLite (Zero-Copy Fast Binary Cache)", table_names
+                except Exception:
+                    pass
+
+    # Check if raw decompressed data is a native SQLite binary image
+    if decompressed_text.startswith("SQLite format 3") or (isinstance(decompressed_text, bytes) and decompressed_text.startswith(b"SQLite format 3")):
+        raw_b = decompressed_text if isinstance(decompressed_text, bytes) else decompressed_text.encode('latin1')
+        conn = sqlite3.connect(":memory:")
+        conn.deserialize(raw_b)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        table_names = {r[0] for r in cursor.fetchall()}
+        return conn, cursor, "SQLite (Instant Zero-Copy Binary Bridge)", table_names
+
     use_duckdb = False
     if engine_preference == "duckdb":
         if not HAS_DUCKDB:
@@ -337,6 +385,16 @@ def load_in_memory_db(decompressed_text: str, wal_path: Optional[str] = None, en
                 pass
 
     conn.commit()
+    if not use_duckdb and spst_path:
+        try:
+            cache_bin_file = f"{spst_path}.bin.cache"
+            bin_data = conn.serialize()
+            tmp_cache = f"{cache_bin_file}.tmp.{os.getpid()}"
+            with open(tmp_cache, "wb") as f_cache:
+                f_cache.write(bin_data)
+            os.replace(tmp_cache, cache_bin_file)
+        except Exception:
+            pass
     return conn, cursor, engine_name, table_names
 
 def execute_relational_sql_in_memory(
@@ -368,7 +426,12 @@ def execute_relational_sql_in_memory(
 
         if conn is None:
             t_m0 = time.perf_counter()
-            conn, cursor, engine_name, table_names = load_in_memory_db(decompressed_text, wal_path=wal_path, engine_preference=engine_preference)
+            conn, cursor, engine_name, table_names = load_in_memory_db(
+                decompressed_text, 
+                wal_path=wal_path, 
+                engine_preference=engine_preference,
+                spst_path=spst_path
+            )
             mount_ms = (time.perf_counter() - t_m0) * 1000.0
             if cache_key:
                 _VAULT_DB_CACHE[cache_key] = (conn, cursor, engine_name, table_names)
@@ -405,13 +468,20 @@ def execute_mutation_on_vault(spst_path: str, sql_mutation: str, engine_preferen
     wal_path = f"{spst_path}.wal"
     tomb_path = f"{spst_path}.tomb"
 
-    with open(spst_path, "rb") as f:
-        raw_bytes = f.read()
-    uncompressed_bytes = inflate_spst_vault(raw_bytes)
-    decompressed_text = uncompressed_bytes.decode("utf-8", errors="ignore")
+    cache_bin_file = f"{spst_path}.bin.cache"
+    conn, cursor = None, None
+    if os.path.exists(cache_bin_file) and os.path.getmtime(cache_bin_file) >= os.path.getmtime(spst_path):
+        try:
+            conn, cursor, engine_name, _ = load_in_memory_db("", wal_path=wal_path, engine_preference="sqlite", spst_path=spst_path)
+        except Exception:
+            conn = None
 
-    # Load in-memory database with existing WAL
-    conn, cursor, engine_name, _ = load_in_memory_db(decompressed_text, wal_path=wal_path, engine_preference="sqlite")
+    if conn is None:
+        with open(spst_path, "rb") as f:
+            raw_bytes = f.read()
+        uncompressed_bytes = inflate_spst_vault(raw_bytes)
+        decompressed_text = uncompressed_bytes.decode("utf-8", errors="ignore")
+        conn, cursor, engine_name, _ = load_in_memory_db(decompressed_text, wal_path=wal_path, engine_preference="sqlite", spst_path=spst_path)
 
     # Normalize query (remove public. prefix etc)
     norm_mutation = re.sub(r"(?i)\bpublic\.([a-zA-Z0-9_]+)\b", r"\1", sql_clean)
@@ -520,11 +590,17 @@ def execute_vacuum_on_vault(spst_path: str, engine_preference: str = "auto") -> 
 
     os.replace(tmp_path, spst_path)
 
-    # Clean up WAL and Tombstones
+    # Clean up WAL, Tombstones, and binary cache
     if os.path.exists(wal_path):
         os.remove(wal_path)
     if os.path.exists(tomb_path):
         os.remove(tomb_path)
+    cache_bin_file = f"{spst_path}.bin.cache"
+    if os.path.exists(cache_bin_file):
+        try:
+            os.remove(cache_bin_file)
+        except Exception:
+            pass
 
     new_comp_size = os.path.getsize(spst_path)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -649,6 +725,48 @@ def query_vault_engine(
         }
 
     compressed_size = os.path.getsize(spst_path)
+    cache_bin_file = f"{spst_path}.bin.cache"
+    has_bin_cache = os.path.exists(cache_bin_file) and os.path.getmtime(cache_bin_file) >= spst_mtime and engine != "duckdb"
+
+    # Fast In-Memory Relational Engine using Precompiled Zero-Copy Cache (bypasses raw dump decompression)
+    if (is_sql or re.match(r"(?i)^\s*(SELECT|WITH|SHOW|EXPLAIN)\b", query.strip())) and engine != "bitstream":
+        if has_bin_cache:
+            relational_res = execute_relational_sql_in_memory(
+                "", query, limit=limit, engine_preference=engine, wal_path=wal_path, spst_path=spst_path, use_cache=use_cache
+            )
+            if relational_res is not None:
+                cols, r_rows, eng_name, mount_ms, exec_ms = relational_res
+                cache_size = os.path.getsize(cache_bin_file)
+                if use_cache and cache_key in _VAULT_DB_CACHE:
+                    c_conn, c_cur, c_eng, c_tbls = _VAULT_DB_CACHE[cache_key][:4]
+                    _VAULT_DB_CACHE[cache_key] = (c_conn, c_cur, c_eng, c_tbls, compressed_size, cache_size)
+                records = [dict(zip(cols, r)) for r in r_rows]
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                compression_ratio = (1.0 - (compressed_size / max(1, cache_size))) * 100.0
+                has_wal = os.path.exists(wal_path)
+                return {
+                    "status": "success",
+                    "mode": "RELATIONAL_SQL_QUERY",
+                    "engine": eng_name,
+                    "query": query,
+                    "matched_term": target_table or query,
+                    "target_table": target_table,
+                    "is_sql_query": True,
+                    "wal_active": has_wal,
+                    "total_matches": len(r_rows),
+                    "columns": cols,
+                    "row_count": len(r_rows),
+                    "rows": r_rows,
+                    "records": records,
+                    "snippets": [],
+                    "compressed_vault_bytes": compressed_size,
+                    "inflated_vault_bytes": cache_size,
+                    "compression_ratio_percent": round(compression_ratio, 2),
+                    "mount_latency_ms": round(mount_ms, 3),
+                    "query_exec_ms": round(exec_ms, 3),
+                    "query_latency_ms": round(elapsed_ms, 3)
+                }
+
     with open(spst_path, "rb") as f:
         raw_bytes = f.read()
 
