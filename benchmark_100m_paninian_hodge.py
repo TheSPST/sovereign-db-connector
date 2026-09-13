@@ -141,6 +141,25 @@ BENCHMARK_QUERIES = [
             ORDER BY timeouts DESC;
         """,
         "pg_estimated_ms": 750.0
+    },
+    {
+        "name": "heavy_users_above_avg",
+        "sql": """
+            WITH user_order_counts AS (
+                SELECT user_id, count(*) AS cnt 
+                FROM orders 
+                GROUP BY user_id
+            ),
+            avg_val AS (
+                SELECT avg(cnt) AS avg_cnt FROM user_order_counts
+            )
+            SELECT u.name, t.cnt 
+            FROM user_order_counts t 
+            JOIN v_users u ON u.id = t.user_id 
+            WHERE t.cnt > (SELECT avg_cnt FROM avg_val) 
+            ORDER BY t.cnt DESC LIMIT 10;
+        """,
+        "pg_estimated_ms": 1408.0
     }
 ]
 
@@ -395,11 +414,11 @@ def benchmark_mount_and_queries():
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Sovereign DB Paninian-Hodge Scale Benchmark")
-    parser.add_argument("--scale", default="10M", choices=["10M", "25M", "50M", "100M"], help="Scale of rows to benchmark (default: 10M)")
+    parser.add_argument("--scale", default="10M", choices=["10M", "20M", "25M", "50M", "100M"], help="Scale of rows to benchmark (default: 10M)")
     parser.add_argument("--clean", action="store_true", help="Auto-delete temporary database after benchmarking to protect MacBook SSD")
     args = parser.parse_args()
 
-    scale_mult = {"10M": 0.1, "25M": 0.25, "50M": 0.5, "100M": 1.0}[args.scale]
+    scale_mult = {"10M": 0.1, "20M": 0.2, "25M": 0.25, "50M": 0.5, "100M": 1.0}[args.scale]
     n_users = int(N_USERS * scale_mult)
     n_products = int(N_PRODUCTS * scale_mult)
     n_orders = int(N_ORDERS * scale_mult)
