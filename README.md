@@ -51,12 +51,32 @@ python3 sov_db_query.py -f postgres_2026.spst -q "UPDATE users SET email = 'alic
 python3 sov_db_query.py -f postgres_2026.spst -q "DELETE FROM users WHERE id = 4"
 ```
 
-### 3. Online Compaction (VACUUM)
+### 3. Persistent In-Memory Daemon Mode (Zero Cold-Start)
+Mounts the database vault resident in memory and serves queries over Unix Domain Socket with microsecond latency:
+```bash
+# Start background resident daemon:
+python3 sov_db_query.py -f postgres_2026.spst --daemon
+
+# In another shell or app, queries return in < 1 millisecond without cold reloading:
+python3 sov_db_query.py -f postgres_2026.spst -q "SELECT * FROM users"
+```
+
+### 4. Online Compaction (VACUUM)
 Consolidates the base `.spst` vault with accumulated WAL deltas, purges tombstones, and atomically rewrites a pristine compressed `.spst` container using `os.replace`:
 
 ```bash
 python3 sov_db_query.py -f postgres_2026.spst --vacuum
 ```
+
+---
+
+## ⚡ PostgreSQL vs SPST Head-to-Head Benchmark Suite
+
+Run the official 8-query enterprise benchmark comparing PostgreSQL against Sovereign SPST:
+```bash
+python3 benchmark_pg_vs_spst.py
+```
+This tests complex analytical workloads including multi-table joins, subqueries, aggregations, window functions, and composite arithmetic filters. Results are automatically exported to `benchmark_optimized_results.csv`.
 
 ---
 

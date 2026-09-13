@@ -1,1 +1,6 @@
 __pycache__/
+*.spst
+*.wal
+*.tomb
+*.sock
+*.csv
