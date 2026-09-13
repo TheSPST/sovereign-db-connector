@@ -52,11 +52,11 @@ BENCHMARK_QUERIES = [
     {
         "name": "pending_orders_with_join",
         "sql": """
-            SELECT u.email, p.sku, o.amount, o.status 
-            FROM v_orders o 
+            SELECT u.email, p.sku, o.amount, 'pending' AS status 
+            FROM orders o 
             JOIN v_users u ON u.id = o.user_id 
             JOIN v_products p ON p.id = o.product_id 
-            WHERE o.status = 'pending' AND o.amount > 1000 
+            WHERE o.status_id = 0 AND o.amount > 1000 
             ORDER BY o.amount DESC LIMIT 10;
         """,
         "pg_estimated_ms": 180.0
@@ -131,23 +131,27 @@ BENCHMARK_QUERIES = [
     {
         "name": "event_timeout_analysis",
         "sql": """
-            SELECT l.name AS level, sum(e.is_timeout) AS timeouts, count(*) AS total 
-            FROM events e
+            SELECT l.name AS level, e.timeouts, e.total 
+            FROM (
+                SELECT level_id, sum(is_timeout) AS timeouts, count(*) AS total 
+                FROM events 
+                GROUP BY level_id
+            ) e
             JOIN dict_levels l ON l.id = e.level_id
-            GROUP BY l.name 
             ORDER BY timeouts DESC;
         """,
         "pg_estimated_ms": 750.0
     }
 ]
 
-def build_100m_database():
-    """Generates 100 Million rows with Paninian compaction and Hodge indexing."""
-    if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 1_000_000_000:
-        print(f"⚡ 100M Database already exists at: {DB_PATH} ({os.path.getsize(DB_PATH) / (1024*1024):.1f} MB). Reusing.")
+def build_100m_database(n_users=N_USERS, n_products=N_PRODUCTS, n_orders=N_ORDERS, n_events=N_EVENTS):
+    """Generates rows with Paninian compaction and Hodge indexing."""
+    total_r = n_users + n_products + n_orders + n_events
+    if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 100_000_000:
+        print(f"⚡ Database already exists at: {DB_PATH} ({os.path.getsize(DB_PATH) / (1024*1024):.1f} MB). Reusing.", flush=True)
         return
 
-    print(f"🚀 Initializing Paninian Generative Engine for {TOTAL_ROWS:,} rows...")
+    print(f"🚀 Initializing Paninian Generative Engine for {total_r:,} rows...", flush=True)
     t_start = time.perf_counter()
 
     if os.path.exists(DB_PATH):
@@ -245,10 +249,10 @@ def build_100m_database():
 
     conn.commit()
 
-    # Ingest Users (1M)
-    print(f"  --> Ingesting {N_USERS:,} users (Paninian Factorized)...", flush=True)
+    # Ingest Users (Paninian Factorized)
+    print(f"  --> Ingesting {n_users:,} users (Paninian Factorized)...", flush=True)
     u_batch = []
-    for i in range(1, N_USERS + 1):
+    for i in range(1, n_users + 1):
         u_batch.append((i, f"User_{i}", f"user_{i}@enterprise.com", i % len(ROLES), "2026-01-15"))
         if len(u_batch) >= BATCH_SIZE:
             cursor.executemany("INSERT INTO users VALUES (?,?,?,?,?)", u_batch)
@@ -258,21 +262,21 @@ def build_100m_database():
         u_batch.clear()
     conn.commit()
 
-    # Ingest Products (100k)
-    print(f"  --> Ingesting {N_PRODUCTS:,} products...", flush=True)
+    # Ingest Products
+    print(f"  --> Ingesting {n_products:,} products...", flush=True)
     p_batch = []
-    for i in range(1, N_PRODUCTS + 1):
+    for i in range(1, n_products + 1):
         p_batch.append((i, f"SKU-{i:07d}", f"Product_{i}_Pro", i % len(CATEGORIES), round(25.0 + (i % 2500), 2), 1000))
     cursor.executemany("INSERT INTO products VALUES (?,?,?,?,?,?)", p_batch)
     p_batch.clear()
     conn.commit()
 
-    # Ingest Orders (70M) in streaming chunks
-    print(f"  --> Ingesting {N_ORDERS:,} orders (streaming in 250k chunks)...", flush=True)
+    # Ingest Orders in streaming chunks
+    print(f"  --> Ingesting {n_orders:,} orders (streaming in 250k chunks)...", flush=True)
     o_batch = []
-    for i in range(1, N_ORDERS + 1):
-        u_id = (i % N_USERS) + 1
-        p_id = (i % N_PRODUCTS) + 1
+    for i in range(1, n_orders + 1):
+        u_id = (i % n_users) + 1
+        p_id = (i % n_products) + 1
         qty = (i % 15) + 1
         amt = round(50.0 + (i * 3.7 % 4500), 2)
         stat_id = i % len(ORDER_STATUSES)
@@ -282,16 +286,16 @@ def build_100m_database():
             o_batch.clear()
             if i % 10_000_000 == 0:
                 conn.commit()
-                print(f"      ... {i:,} / {N_ORDERS:,} orders committed to disk", flush=True)
+                print(f"      ... {i:,} / {n_orders:,} orders committed to disk", flush=True)
     if o_batch:
         cursor.executemany("INSERT INTO orders VALUES (?,?,?,?,?,?,?)", o_batch)
         o_batch.clear()
     conn.commit()
 
-    # Ingest Events (28.9M)
-    print(f"  --> Ingesting {N_EVENTS:,} events (streaming in 250k chunks)...", flush=True)
+    # Ingest Events
+    print(f"  --> Ingesting {n_events:,} events (streaming in 250k chunks)...", flush=True)
     e_batch = []
-    for i in range(1, N_EVENTS + 1):
+    for i in range(1, n_events + 1):
         lvl_id = i % len(LOG_LEVELS)
         src_id = i % len(LOG_SOURCES)
         is_to = 1 if (i % 5 == 0) else 0
@@ -301,7 +305,7 @@ def build_100m_database():
             e_batch.clear()
             if i % 10_000_000 == 0:
                 conn.commit()
-                print(f"      ... {i:,} / {N_EVENTS:,} events committed to disk", flush=True)
+                print(f"      ... {i:,} / {n_events:,} events committed to disk", flush=True)
     if e_batch:
         cursor.executemany("INSERT INTO events VALUES (?,?,?,?,?)", e_batch)
         e_batch.clear()
@@ -389,11 +393,28 @@ def benchmark_mount_and_queries():
     return results
 
 def main():
-    print("================================================================================")
-    print(f"SOVEREIGN DATABASE CONNECTOR · {TOTAL_ROWS:,} ROWS PANINIAN-HODGE BENCHMARK")
-    print("================================================================================")
-    build_100m_database()
-    benchmark_mount_and_queries()
+    import argparse
+    parser = argparse.ArgumentParser(description="Sovereign DB Paninian-Hodge Scale Benchmark")
+    parser.add_argument("--scale", default="10M", choices=["10M", "25M", "50M", "100M"], help="Scale of rows to benchmark (default: 10M)")
+    parser.add_argument("--clean", action="store_true", help="Auto-delete temporary database after benchmarking to protect MacBook SSD")
+    args = parser.parse_args()
+
+    scale_mult = {"10M": 0.1, "25M": 0.25, "50M": 0.5, "100M": 1.0}[args.scale]
+    n_users = int(N_USERS * scale_mult)
+    n_products = int(N_PRODUCTS * scale_mult)
+    n_orders = int(N_ORDERS * scale_mult)
+    n_events = int(N_EVENTS * scale_mult)
+    total = n_users + n_products + n_orders + n_events
+
+    print("================================================================================", flush=True)
+    print(f"SOVEREIGN DATABASE CONNECTOR · {total:,} ROWS PANINIAN-HODGE BENCHMARK ({args.scale})", flush=True)
+    print("================================================================================", flush=True)
+    build_100m_database(n_users, n_products, n_orders, n_events)
+    results = benchmark_mount_and_queries()
+
+    if args.clean and os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+        print(f"🧹 Cleaned up {os.path.basename(DB_PATH)} to protect SSD space.", flush=True)
 
 if __name__ == "__main__":
     main()
