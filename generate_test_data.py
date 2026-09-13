@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""
+Sovereign Database Connector - Test Data Generator & Loader
+
+Streams a realistic, deterministic multi-table PostgreSQL dump
+(users / products / orders / events) to a file or stdout, sized to
+millions of rows, and can load it directly into a local Postgres
+instance (Docker container or host psql).
+
+Usage:
+    python3 generate_test_data.py --out dump.sql
+    python3 generate_test_data.py --stdout | docker exec -i postgres psql -U postgres -d sovereign_test
+    python3 generate_test_data.py --users 1000 --orders 20000 --out small.sql
+"""
+
+import argparse
+import os
+import random
+import string
+import sys
+from datetime import datetime, timedelta, timezone
+
+DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sovereign_dump.sql")
+
+FIRST_NAMES = ["Alice", "Bob", "Charlie", "Dana", "Erin", "Frank", "Grace", "Henry",
+               "Ivy", "Jack", "Kara", "Liam", "Maya", "Nina", "Oscar", "Priya",
+               "Quinn", "Ravi", "Sasha", "Tom", "Uma", "Victor", "Wendy", "Xavier",
+               "Yara", "Zane"]
+LAST_NAMES = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
+              "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez",
+              "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin"]
+ROLES = ["admin", "analyst", "engineer", "auditor", "ciso", "operator", "viewer"]
+CATEGORIES = ["hardware", "software", "network", "security", "storage", "analytics",
+              "ai-ml", "devops", "database", "cloud"]
+ORDER_STATUSES = ["pending", "processing", "shipped", "delivered", "cancelled",
+                  "refunded", "on_hold"]
+LOG_LEVELS = ["debug", "info", "warn", "error", "critical"]
+LOG_SOURCES = ["api-gateway", "auth-service", "billing-service", "order-service",
+               "sync-engine", "vault-streamer", "query-engine", "compactor"]
+
+NAME_PARTS = ["Phoenix", "Falcon", "Nexus", "Quantum", "Titan", "Atlas", "Nimbus",
+              "Vector", "Vertex", "Pulse", "Sentinel", "Cobalt", "Onyx", "Jade",
+              "Amber", "Crimson", "Ivory", "Eclipse", "Aurora", "Zenith"]
+
+FLUSH_EVERY = 10000
+
+
+def seeded(seed):
+    return random.Random(seed)
+
+
+def ts_between(rng, start, end):
+    delta = end - start
+    return start + timedelta(seconds=rng.randrange(int(delta.total_seconds())))
+
+
+def fmt_ts(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + "+00"
+
+
+def esc(v):
+    if v is None:
+        return r"\N"
+    return str(v)
+
+
+def batched_write(stream, buf):
+    """Writes buffered lines and clears; keeps writes chunked for throughput."""
+    stream.write("\n".join(buf) + "\n")
+    buf.clear()
+
+
+def gen_users(rng, n, start_dt):
+    for i in range(1, n + 1):
+        if i == 1:
+            name, email, role = "Alice", "alice@cyber.gov", "admin"
+        elif i == 2:
+            name, email, role = "Bob", "bob@cyber.gov", "analyst"
+        elif i == 3:
+            name, email, role = "Charlie", "charlie@cyber.gov", "engineer"
+        else:
+            name = rng.choice(FIRST_NAMES) + " " + rng.choice(LAST_NAMES)
+            email = "user" + str(i) + "@test.com"
+            role = rng.choice(ROLES)
+        created = fmt_ts(ts_between(rng, start_dt, start_dt + timedelta(days=300)))
+        yield f"{i}\t{esc(name)}\t{esc(email)}\t{role}\t{created}"
+
+
+def gen_products(rng, n):
+    for i in range(1, n + 1):
+        sku = "SKU-" + "".join(rng.choice(string.ascii_uppercase + string.digits) for _ in range(8))
+        name = (rng.choice(NAME_PARTS) + " " + rng.choice(NAME_PARTS) + " " +
+                rng.choice(["Pro", "Lite", "Max", "Mini", "Express"]))
+        category = rng.choice(CATEGORIES)
+        price = round(rng.uniform(9.99, 4999.99), 2)
+        stock = rng.randrange(0, 5000)
+        yield f"{i}\t{sku}\t{esc(name)}\t{category}\t{price}\t{stock}"
+
+
+def gen_orders(rng, n, n_users, n_products, start_dt):
+    for i in range(1, n + 1):
+        user_id = rng.randrange(1, n_users + 1)
+        product_id = rng.randrange(1, n_products + 1)
+        quantity = rng.randrange(1, 20)
+        price = round(rng.uniform(9.99, 4999.99) * quantity, 2)
+        status = rng.choice(ORDER_STATUSES)
+        created = fmt_ts(ts_between(rng, start_dt, start_dt + timedelta(days=300)))
+        yield f"{i}\t{user_id}\t{product_id}\t{quantity}\t{price}\t{status}\t{created}"
+
+
+def gen_events(rng, n, start_dt):
+    for i in range(1, n + 1):
+        level = rng.choice(LOG_LEVELS)
+        source = rng.choice(LOG_SOURCES)
+        message = (f"{source} {level} {rng.choice(['request', 'response', 'retry', 'timeout', 'auth_fail', 'rate_limit'])} "
+                   f"took {rng.randrange(1, 9000)} ms (trace_id=trace-{i:06d})")
+        created = fmt_ts(ts_between(rng, start_dt, start_dt + timedelta(days=90)))
+        yield f"{i}\t{level}\t{source}\t{esc(message)}\t{created}"
+
+
+HEADER = """--
+-- Sovereign DB Connector test data dump
+--
+-- Generated by generate_test_data.py
+--
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SET default_tablespace = '';
+SET default_table_access_method = heap;
+
+CREATE TABLE public.users (
+    id integer NOT NULL,
+    name character varying NOT NULL,
+    email character varying,
+    role character varying,
+    created_at timestamp with time zone
+);
+
+CREATE SEQUENCE public.users_id_seq AS integer START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1;
+ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
+ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+
+CREATE TABLE public.products (
+    id integer NOT NULL,
+    sku character varying NOT NULL,
+    name character varying NOT NULL,
+    category character varying,
+    price numeric(10,2),
+    stock integer
+);
+
+CREATE SEQUENCE public.products_id_seq AS integer START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1;
+ALTER SEQUENCE public.products_id_seq OWNED BY public.products.id;
+ALTER TABLE ONLY public.products ALTER COLUMN id SET DEFAULT nextval('public.products_id_seq'::regclass);
+
+CREATE TABLE public.orders (
+    id bigint NOT NULL,
+    user_id integer,
+    product_id integer,
+    quantity integer,
+    amount numeric(12,2),
+    status character varying,
+    created_at timestamp with time zone
+);
+
+CREATE SEQUENCE public.orders_id_seq AS bigint START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1;
+ALTER SEQUENCE public.orders_id_seq OWNED BY public.orders.id;
+ALTER TABLE ONLY public.orders ALTER COLUMN id SET DEFAULT nextval('public.orders_id_seq'::regclass);
+
+CREATE TABLE public.events (
+    id bigint NOT NULL,
+    level character varying,
+    source character varying,
+    message text,
+    created_at timestamp with time zone
+);
+
+CREATE SEQUENCE public.events_id_seq AS bigint START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1;
+ALTER SEQUENCE public.events_id_seq OWNED BY public.events.id;
+ALTER TABLE ONLY public.events ALTER COLUMN id SET DEFAULT nextval('public.events_id_seq'::regclass);
+"""
+
+FOOTER = """SELECT pg_catalog.setval('public.users_id_seq', {users}, true);
+SELECT pg_catalog.setval('public.products_id_seq', {products}, true);
+SELECT pg_catalog.setval('public.orders_id_seq', {orders}, true);
+SELECT pg_catalog.setval('public.events_id_seq', {events}, true);
+
+ALTER TABLE ONLY public.users ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.products ADD CONSTRAINT products_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.events ADD CONSTRAINT events_pkey PRIMARY KEY (id);
+CREATE UNIQUE INDEX ix_users_email ON public.users USING btree (email);
+CREATE INDEX ix_orders_user_id ON public.orders USING btree (user_id);
+CREATE INDEX ix_events_level ON public.events USING btree (level);
+
+-- PostgreSQL database dump complete
+"""
+
+
+def stream_dump(stream, n_users, n_products, n_orders, n_events):
+    rng = seeded(42)
+    start_dt = datetime(2025, 11, 1, tzinfo=timezone.utc)
+    buf = []
+
+    stream.write(HEADER)
+
+    buf.append("")
+    buf.append("COPY public.users (id, name, email, role, created_at) FROM stdin;")
+    for row in gen_users(rng, n_users, start_dt):
+        buf.append(row)
+        if len(buf) >= FLUSH_EVERY:
+            batched_write(stream, buf)
+    buf.append(r"\.")
+    if buf:
+        batched_write(stream, buf)
+
+    buf.append("")
+    buf.append("COPY public.products (id, sku, name, category, price, stock) FROM stdin;")
+    for row in gen_products(rng, n_products):
+        buf.append(row)
+        if len(buf) >= FLUSH_EVERY:
+            batched_write(stream, buf)
+    buf.append(r"\.")
+    if buf:
+        batched_write(stream, buf)
+
+    buf.append("")
+    buf.append("COPY public.orders (id, user_id, product_id, quantity, amount, status, created_at) FROM stdin;")
+    for row in gen_orders(rng, n_orders, n_users, n_products, start_dt):
+        buf.append(row)
+        if len(buf) >= FLUSH_EVERY:
+            batched_write(stream, buf)
+    buf.append(r"\.")
+    if buf:
+        batched_write(stream, buf)
+
+    buf.append("")
+    buf.append("COPY public.events (id, level, source, message, created_at) FROM stdin;")
+    for row in gen_events(rng, n_events, start_dt):
+        buf.append(row)
+        if len(buf) >= FLUSH_EVERY:
+            batched_write(stream, buf)
+    buf.append(r"\.")
+    if buf:
+        batched_write(stream, buf)
+
+    stream.write(FOOTER.format(users=n_users, products=n_products, orders=n_orders, events=n_events))
+    stream.flush()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate streaming test data for Sovereign DB Connector")
+    parser.add_argument("--out", "-o", default=DEFAULT_OUT, help="Output SQL dump path")
+    parser.add_argument("--stdout", action="store_true", help="Write dump to stdout (pipe into psql)")
+    parser.add_argument("--users", type=int, default=250000)
+    parser.add_argument("--products", type=int, default=20000)
+    parser.add_argument("--orders", type=int, default=15000000)
+    parser.add_argument("--events", type=int, default=5000000)
+    parser.add_argument("--load", action="store_true", help="Load dump into local Postgres via psql")
+    parser.add_argument("--container", default="postgres",
+                        help="Docker container name used as psql host (default: postgres)")
+    args = parser.parse_args()
+
+    total = args.users + args.products + args.orders + args.events
+    print(f"Streaming {total:,} rows (users={args.users:,}, products={args.products:,}, "
+          f"orders={args.orders:,}, events={args.events:,})", file=sys.stderr)
+
+    if args.stdout and args.load:
+        parser.error("--stdout and --load are mutually exclusive")
+
+    if args.stdout:
+        stream_dump(sys.stdout, args.users, args.products, args.orders, args.events)
+    else:
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+        with open(args.out, "w", encoding="utf-8") as f:
+            stream_dump(f, args.users, args.products, args.orders, args.events)
+        size_mb = os.path.getsize(args.out) / 1048576.0
+        print(f"Wrote {args.out} ({size_mb:.1f} MB)", file=sys.stderr)
+
+    if args.load:
+        import shutil
+        import subprocess
+        if shutil.which("docker"):
+            psql = f"docker exec -i {args.container} psql".split()
+        else:
+            parser.error("--load requires Docker (no local psql found)")
+        db = "sovereign_test"
+        subprocess.run(psql + ["-U", "postgres", "-c", f"DROP DATABASE IF EXISTS {db}"], check=True)
+        subprocess.run(psql + ["-U", "postgres", "-c", f"CREATE DATABASE {db}"], check=True)
+        with open(args.out, "r", encoding="utf-8") as f:
+            subprocess.run(psql + ["-U", "postgres", "-d", db], stdin=f, check=True)
+        print(f"Loaded {args.out} into database '{db}' on {args.container}.", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
